@@ -201,21 +201,20 @@ async def ask_next_action(update):
 # Handle image upload for Infection Symptoms
 async def upload_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    field = "Infection Symptoms"
 
-    if user_id not in user_session_data or field not in user_session_data[user_id]:
-        await update.message.reply_text("❌ No field in progress to attach image.")
-        return
+    if user_id not in user_session_data:
+        user_session_data[user_id] = {}
 
     photo = update.message.photo[-1]
     file = await photo.get_file()
     image_path = f"images/{user_id}_{file.file_id}.jpg"
     await file.download_to_drive(image_path)
 
-    user_session_data[user_id][field]["image"] = image_path
+    # Store in a generic image field
+    user_session_data[user_id]["__poultry_image"] = image_path
 
-    await show_confirmation(update, context)
-    return CONFIRMING
+    await update.message.reply_text("🖼️ Image received and saved.")
+    return await ask_next_action(update)
 
 async def handle_image_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -271,6 +270,15 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     data = user_session_data.get(user_id, {})
+    
+    # Check if no data is entered
+    has_fields = any(k for k in data if not k.startswith("__"))
+    has_image = "__poultry_image" in data
+
+    if not has_fields and not has_image:
+        await send("📭 You haven't entered any data yet.")
+        await send_checklist(user_id, send)
+        return SELECTING_DATA
 
     await send("📋 Here's the data you've entered:")
 
@@ -279,18 +287,22 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue  # skip metadata keys like __case_id
 
         msg = f"📌 *{field}*\n📝 {content['value']}"
-        if field == "Infection Symptoms" and "image" in content:
-            try:
-                with open(content["image"], "rb") as img_file:
-                    await send_photo(chat_id=chat_id, photo=img_file, caption=msg, parse_mode="Markdown")
-            except FileNotFoundError:
-                await send(f"{msg}\n⚠️ Image file not found.")
-        else:
-            await send(msg, parse_mode="Markdown")
+        await send(msg, parse_mode="Markdown")
+        
+    # ✅ Show poultry image if uploaded
+    image_path = data.get("__poultry_image")
+    if image_path and os.path.exists(image_path):
+        with open(image_path, "rb") as img:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=img,
+                caption="🖼️ Uploaded image of infected poultry."
+            )
 
     keyboard = [
         [InlineKeyboardButton("✅ Confirm & Save", callback_data="confirm_save")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_entry")]
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_entry")],
+        [InlineKeyboardButton("🔙 Return to Main Menu", callback_data="back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await send("Do you want to save this data?", reply_markup=reply_markup)
@@ -312,7 +324,7 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         body_temperature = session_data.get("Body Temperature", {}).get("value")
         vaccination_med = session_data.get("Vaccination/Medication", {}).get("value")
         infection_symptoms = session_data.get("Infection Symptoms", {}).get("value")
-        image_path = session_data.get("Infection Symptoms", {}).get("image")
+        image_path = session_data.get("__poultry_image")
         case_id = session_data.pop("__case_id", None)
         
         if case_id:
@@ -373,6 +385,15 @@ async def cancel_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
 
+    # Delete uploaded image if it exists
+    image_path = user_session_data.get(user_id, {}).get("__poultry_image")
+    if image_path and os.path.exists(image_path):
+        try:
+            os.remove(image_path)
+            print(f"🗑️ Deleted image at {image_path}")
+        except Exception as e:
+            print(f"❌ Failed to delete image: {e}")
+
     # Remove in-memory data
     user_session_data.pop(user_id, None)
 
@@ -411,29 +432,30 @@ async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not data:
         await query.message.reply_text("📭 You haven't entered any data yet.")
-        return CONFIRMING
+        return SELECTING_DATA
 
-    # Accumulate all field content
+    # 1. Show all entered data
     review_text = "📋 *Here's what you've entered so far:*\n\n"
     for field, content in data.items():
         if field.startswith("__"):
-            continue  # skip metadata keys like __case_id
+            continue
         review_text += f"📌 *{field}*\n📝 {content['value']}\n\n"
 
-    await query.message.reply_text(
-        review_text,
-        parse_mode="Markdown"
-    )
+    await query.message.reply_text(review_text, parse_mode="Markdown")
 
-    # Add buttons for next action
-    await query.message.reply_text(
-        "You can continue adding data or finish reviewing.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Add More", callback_data="add_more")],
-            [InlineKeyboardButton("✅ Finish & Review", callback_data="finish_review")]
-        ])
-    )
-    return CONFIRMING
+    # 2. Show image if present
+    image_path = data.get("__poultry_image")
+    if image_path and os.path.exists(image_path):
+        with open(image_path, "rb") as img:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=img,
+                caption="🖼️ Uploaded image of infected poultry."
+            )
+
+    # 3. Re-show main menu checklist
+    await send_checklist(user_id, query.message.reply_text)
+    return SELECTING_DATA
 
 def load_incomplete_data(user_id):
     conn = sqlite3.connect("poultry_data.db")
@@ -462,7 +484,7 @@ def load_incomplete_data(user_id):
         if value:
             session_data[field] = {"value": value}
     if row[5]:
-        session_data["Infection Symptoms"]["image"] = row[5]
+        session_data["__poultry_image"] = row[5]
 
     return session_data
 
@@ -494,6 +516,7 @@ def main():
                 MessageHandler(filters.PHOTO, upload_image),
                 CommandHandler("skip", skip_image),
                 CallbackQueryHandler(send_back_to_main_menu, pattern="^back_to_menu$"),
+                CallbackQueryHandler(review_callback, pattern="review_data"),
             ],
             CONFIRMING: [
                 CallbackQueryHandler(confirm_save, pattern="confirm_save"),
@@ -501,6 +524,7 @@ def main():
                 CallbackQueryHandler(start, pattern="add_more"),
                 CallbackQueryHandler(review_callback, pattern="review_data"),
                 CallbackQueryHandler(show_confirmation, pattern="finish_review"),
+                CallbackQueryHandler(send_back_to_main_menu, pattern="^back_to_menu$"),
             ],
             CONFIRM_CANCEL: [
                 CallbackQueryHandler(cancel_confirmed, pattern="cancel_confirmed"),
