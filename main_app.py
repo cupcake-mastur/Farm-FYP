@@ -46,28 +46,32 @@ def init_db():
 
 # Start Command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    if update.message:
+        user_id = update.message.from_user.id
+        await send_checklist(user_id, update.message.reply_text)
+        return SELECTING_DATA
+    elif update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        await send_checklist(user_id, query.message.edit_text)
+        return SELECTING_DATA
+
+async def send_checklist(user_id, send_func):
     if user_id not in user_session_data:
         user_session_data[user_id] = {}
 
     session = user_session_data[user_id]
-
-    # Compose checklist display
     checklist = "📋 Please provide the following information to help track poultry health.\n\n"
     checklist += "✅ = Filled, ❌ = Missing\n\n"
-
     for field in DATA_FIELDS:
         filled = "✅" if field in session else "❌"
         checklist += f"{filled} {field}\n"
-
     checklist += "\nTap a button below to enter or update a field:"
-
-    # Build keyboard
+    
     keyboard = [[InlineKeyboardButton(field, callback_data=field)] for field in DATA_FIELDS]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(checklist, reply_markup=reply_markup)
-    return SELECTING_DATA
+    await send_func(checklist, reply_markup=reply_markup)
 
 # Handle field selection
 async def select_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -78,37 +82,33 @@ async def select_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"📝 Enter value for *{selection}*:", parse_mode="Markdown")
     return ENTERING_VALUE
 
-# Handle text input for field
+# Replace your `enter_value` function with this:
 async def enter_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     field = context.user_data["current_field"]
     value = update.message.text.strip()
 
-    # Field-specific validation
     if field == "Body Weight":
         try:
             weight = float(value)
-            if not (0.03 <= weight <= 30):  # poultry weight range in kg
+            if not (0.03 <= weight <= 30):
                 raise ValueError
         except ValueError:
             await update.message.reply_text("❌ Please enter a valid weight in kg (e.g., 1.5).")
             return ENTERING_VALUE
-
     elif field == "Body Temperature":
         try:
             temp = float(value)
-            if not (30 <= temp <= 45):  # typical poultry body temp range
+            if not (30 <= temp <= 45):
                 raise ValueError
         except ValueError:
             await update.message.reply_text("❌ Please enter a valid temperature in °C (e.g., 41.5).")
             return ENTERING_VALUE
-
     elif field == "Vaccination/Medication":
         if len(value) < 2:
             await update.message.reply_text("❌ Please enter more details (at least 2 characters).")
             return ENTERING_VALUE
 
-    # Save to session
     if user_id not in user_session_data:
         user_session_data[user_id] = {}
     user_session_data[user_id][field] = {"value": value}
@@ -117,7 +117,17 @@ async def enter_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📷 You can now upload an image (optional) or type /skip if none.")
         return UPLOADING_IMAGE
     else:
-        return await start(update, context)
+        return await ask_next_action(update)
+    
+# Helper after data entry
+async def ask_next_action(update):
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add More", callback_data="add_more")],
+        [InlineKeyboardButton("🔍 Review Data", callback_data="review_data")],
+        [InlineKeyboardButton("✅ Finish & Review", callback_data="finish_review")]
+    ])
+    await update.message.reply_text("What would you like to do next?", reply_markup=keyboard)
+    return CONFIRMING
 
 
 # Handle image upload for Infection Symptoms
@@ -146,29 +156,43 @@ async def skip_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Show all collected data for confirmation
 async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    # Handle both message and callback cases safely
+    if update.message:
+        user_id = update.message.from_user.id
+        chat_id = update.message.chat_id
+        send = update.message.reply_text
+        send_photo = update.message.reply_photo
+    elif update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        chat_id = query.message.chat_id
+        send = query.message.reply_text
+        send_photo = context.bot.send_photo
+    else:
+        return
+
     data = user_session_data.get(user_id, {})
-    
-    await update.message.reply_text("📋 Here's the data you've entered:")
+
+    await send("📋 Here's the data you've entered:")
 
     for field, content in data.items():
         msg = f"📌 *{field}*\n📝 {content['value']}"
         if field == "Infection Symptoms" and "image" in content:
-            # await update.message.reply_photo(photo=InputFile(content["image"]), caption=msg, parse_mode="Markdown")
             try:
                 with open(content["image"], "rb") as img_file:
-                    await update.message.reply_photo(photo=img_file, caption=msg, parse_mode="Markdown")
+                    await send_photo(chat_id=chat_id, photo=img_file, caption=msg, parse_mode="Markdown")
             except FileNotFoundError:
-                await update.message.reply_text(f"{msg}\n⚠️ Image file not found.")
+                await send(f"{msg}\n⚠️ Image file not found.")
         else:
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await send(msg, parse_mode="Markdown")
 
     keyboard = [
         [InlineKeyboardButton("✅ Confirm & Save", callback_data="confirm_save")],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel_entry")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Do you want to save this data?", reply_markup=reply_markup)
+    await send("Do you want to save this data?", reply_markup=reply_markup)
 
 # Handle confirmation
 async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,6 +246,28 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Cancelled.")
     return ConversationHandler.END
 
+async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = user_session_data.get(user_id, {})
+
+    if not data:
+        await query.message.reply_text("📭 You haven't entered any data yet.")
+        return CONFIRMING
+
+    await query.message.reply_text("📋 Here's what you've entered so far:")
+    for field, content in data.items():
+        msg = f"📌 *{field}*\n📝 {content['value']}"
+        await query.message.reply_text(msg, parse_mode="Markdown")
+
+    await query.message.reply_text("You can continue adding data or finish reviewing.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add More", callback_data="add_more")],
+            [InlineKeyboardButton("✅ Finish & Review", callback_data="finish_review")]
+        ]))
+    return CONFIRMING
+
 # Main
 def main():
     init_db()
@@ -240,7 +286,10 @@ def main():
             ],
             CONFIRMING: [
                 CallbackQueryHandler(confirm_save, pattern="confirm_save"),
-                CallbackQueryHandler(cancel_entry, pattern="cancel_entry")
+                CallbackQueryHandler(cancel_entry, pattern="cancel_entry"),
+                CallbackQueryHandler(start, pattern="add_more"),
+                CallbackQueryHandler(review_callback, pattern="review_data"),
+                CallbackQueryHandler(show_confirmation, pattern="finish_review"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
