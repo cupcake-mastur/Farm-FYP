@@ -34,8 +34,11 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS poultry_health (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user TEXT,
-        data_type TEXT,
-        value TEXT,
+        body_weight TEXT,
+        body_temperature TEXT,
+        vaccination_medication TEXT,
+        infection_symptoms TEXT,
+        image_path TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
     conn.commit()
@@ -161,24 +164,33 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         user_id = query.from_user.id
         session_data = user_session_data.get(user_id, {})
-        print(f"Saving session_data for user {user_id}: {session_data}")    
-        print(f"Session data items: {session_data.items()}")    
+        print(f"Saving session_data for user {user_id}: {session_data}")
+
         conn = sqlite3.connect("poultry_data.db")
         c = conn.cursor()
 
-        for field, content in session_data.items():
-            if field == "Infection Symptoms":
-                continue  # Don't save this field
-            c.execute(
-                "INSERT INTO poultry_health (user, data_type, value) VALUES (?, ?, ?)",
-                (str(user_id), field, content["value"])
-            )
+        body_weight = session_data.get("Body Weight", {}).get("value")
+        body_temperature = session_data.get("Body Temperature", {}).get("value")
+        vaccination_med = session_data.get("Vaccination/Medication", {}).get("value")
+        infection_symptoms = session_data.get("Infection Symptoms", {}).get("value")
+        image_path = session_data.get("Infection Symptoms", {}).get("image")
+
+        c.execute('''
+            INSERT INTO poultry_health (
+                user, body_weight, body_temperature,
+                vaccination_medication, infection_symptoms, image_path
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            str(user_id), body_weight, body_temperature,
+            vaccination_med, infection_symptoms, image_path
+        ))
+
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"❌ DB Write Error: {e}")
 
-    await query.edit_message_text("✅ Data saved successfully (except 'Infection Symptoms').")
+    await query.edit_message_text("✅ Case saved successfully.")
     user_session_data.pop(user_id, None)
     return ConversationHandler.END
 
