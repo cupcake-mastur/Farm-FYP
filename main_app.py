@@ -58,6 +58,18 @@ async def start_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("📋 Select data to enter:", reply_markup=reply_markup)
     return SELECTING_DATA
 
+def get_next_action_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add More", callback_data="add_more")],
+        [InlineKeyboardButton("🔍 Review Data", callback_data="review_data")],
+        [InlineKeyboardButton("✅ Finish & Review", callback_data="finish_review")]
+    ])
+
+def get_confirm_cancel_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Confirm & Save", callback_data="confirm_save")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_entry")]
+    ])
 
 # Handle field selection
 async def select_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,12 +119,7 @@ async def enter_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📷 You can now upload an image (optional) or type /skip if none.")
         return UPLOADING_IMAGE
     
-    keyboard = [
-        [InlineKeyboardButton("➕ Add More", callback_data="add_more")],
-        [InlineKeyboardButton("✅ Finish & Review", callback_data="finish_review")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("What would you like to do next?", reply_markup=reply_markup)
+    await update.message.reply_text("What would you like to do next?", reply_markup=get_next_action_keyboard())
     return CONFIRMING
 
 
@@ -132,23 +139,40 @@ async def upload_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_session_data[user_id][field]["image"] = image_path
 
-    keyboard = [
-    [InlineKeyboardButton("➕ Add More", callback_data="add_more")],
-    [InlineKeyboardButton("✅ Finish & Review", callback_data="finish_review")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("What would you like to do next?", reply_markup=reply_markup)
+    await update.message.reply_text("What would you like to do next?", reply_markup=get_next_action_keyboard())
     return CONFIRMING
 
 
 # Skip uploading image
 async def skip_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("What would you like to do next?", reply_markup=get_next_action_keyboard())
+
+    return CONFIRMING
+
+# Review data entered
+async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = user_session_data.get(user_id, {})
+
+    if not data:
+        await query.edit_message_text("📭 You haven't entered any data yet.")
+        return CONFIRMING
+
+    await query.message.reply_text("📋 Here's what you've entered so far:")
+    for field, content in data.items():
+        msg = f"📌 *{field}*\n📝 {content['value']}"
+        await query.message.reply_text(msg, parse_mode="Markdown")
+    
+    # Re-show confirmation buttons
     keyboard = [
-    [InlineKeyboardButton("➕ Add More", callback_data="add_more")],
-    [InlineKeyboardButton("✅ Finish & Review", callback_data="finish_review")]
+        [InlineKeyboardButton("➕ Add More", callback_data="add_more")],
+        [InlineKeyboardButton("✅ Finish & Review", callback_data="finish_review")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("What would you like to do next?", reply_markup=reply_markup)
+    await query.message.reply_text("What would you like to do next?", reply_markup=reply_markup)
+
     return CONFIRMING
 
 
@@ -187,12 +211,7 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await send(msg, parse_mode="Markdown")
 
-    keyboard = [
-        [InlineKeyboardButton("✅ Confirm & Save", callback_data="confirm_save")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_entry")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await send("Do you want to save this data?", reply_markup=reply_markup)
+    await send("Do you want to save this data?", reply_markup=get_confirm_cancel_keyboard())
 
 
 # Handle confirmation
@@ -253,7 +272,9 @@ def main():
                 CallbackQueryHandler(start_from_button, pattern="add_more"),
                 CallbackQueryHandler(show_confirmation, pattern="finish_review"),
                 CallbackQueryHandler(confirm_save, pattern="confirm_save"),
-                CallbackQueryHandler(cancel_entry, pattern="cancel_entry")
+                CallbackQueryHandler(cancel_entry, pattern="cancel_entry"),
+                CallbackQueryHandler(review_callback, pattern="review_data")
+
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
