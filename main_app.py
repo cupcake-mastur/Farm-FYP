@@ -40,13 +40,40 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Check DB for missing fields
+def get_missing_fields(user_id):
+    conn = sqlite3.connect("poultry_data.db")
+    c = conn.cursor()
+    c.execute("SELECT data_type FROM poultry_health WHERE user = ?", (str(user_id),))
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return []  # No record yet, treat as fresh start
+
+    existing_fields = {row[0] for row in rows}
+    return [field for field in DATA_FIELDS if field not in existing_fields]
+
+
 # Start Command
 async def start_from_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    keyboard = [[InlineKeyboardButton(field, callback_data=field)] for field in DATA_FIELDS]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    missing_fields = get_missing_fields(user_id)
+
     user_session_data[user_id] = {}
-    await update.message.reply_text("📋 Select data to enter:", reply_markup=reply_markup)
+
+    if missing_fields:
+        keyboard = [[InlineKeyboardButton(field, callback_data=field)] for field in missing_fields]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"🛠️ You have an incomplete record. Let's finish it!\nMissing fields: {', '.join(missing_fields)}",
+            reply_markup=reply_markup
+        )
+    else:
+        keyboard = [[InlineKeyboardButton(field, callback_data=field)] for field in DATA_FIELDS]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("📋 Select data to enter:", reply_markup=reply_markup)
+
     return SELECTING_DATA
 
 async def start_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
