@@ -48,11 +48,25 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id not in user_session_data:
-        user_session_data[user_id] = {}  # only initialize if not present
+        user_session_data[user_id] = {}
 
+    session = user_session_data[user_id]
+
+    # Compose checklist display
+    checklist = "📋 Please provide the following information to help track poultry health.\n\n"
+    checklist += "✅ = Filled, ❌ = Missing\n\n"
+
+    for field in DATA_FIELDS:
+        filled = "✅" if field in session else "❌"
+        checklist += f"{filled} {field}\n"
+
+    checklist += "\nTap a button below to enter or update a field:"
+
+    # Build keyboard
     keyboard = [[InlineKeyboardButton(field, callback_data=field)] for field in DATA_FIELDS]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("📋 Select data to enter:", reply_markup=reply_markup)
+
+    await update.message.reply_text(checklist, reply_markup=reply_markup)
     return SELECTING_DATA
 
 # Handle field selection
