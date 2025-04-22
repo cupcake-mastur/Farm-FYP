@@ -23,6 +23,10 @@ DATA_FIELDS = [
     "Infection Symptoms"
 ]
 
+RESUME_OR_NEW = 99  # New state before SELECTING_DATA
+
+CONFIRM_CANCEL = 100
+
 # In-memory user session data
 user_session_data = {}
 
@@ -46,16 +50,64 @@ def init_db():
 
 # Start Command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    previous_data = load_incomplete_data(user_id)
+
+    # Determine if this is a message or a callback query
     if update.message:
-        user_id = update.message.from_user.id
-        await send_checklist(user_id, update.message.reply_text)
-        return SELECTING_DATA
+        sender = update.message
+        send = sender.reply_text
     elif update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        user_id = query.from_user.id
-        await send_checklist(user_id, query.message.edit_text)
+        sender = update.callback_query.message
+        await update.callback_query.answer()
+        send = sender.reply_text
+    else:
+        return ConversationHandler.END  # fallback
+
+    if user_id not in user_session_data and previous_data:
+        # Ask user if they want to resume or start fresh
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Resume Previous Case", callback_data="resume_case")],
+            [InlineKeyboardButton("🆕 Start New Case", callback_data="new_case")]
+        ])
+        await send(
+            "🕵️ We detected an unfinished case from you.\nWould you like to continue where you left off?",
+            reply_markup=keyboard
+        )
+        return RESUME_OR_NEW
+    else:
+        if user_id not in user_session_data:
+            user_session_data[user_id] = previous_data
+        await send_checklist(user_id, send)
         return SELECTING_DATA
+    
+async def handle_resume_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "resume_case":
+        user_session_data[user_id] = load_incomplete_data(user_id)
+        await send_checklist(user_id, query.message.edit_text)
+
+    elif query.data == "new_case":
+        # 🧹 Delete previously detected case from DB
+        try:
+            conn = sqlite3.connect("poultry_data.db")
+            c = conn.cursor()
+            c.execute('''DELETE FROM poultry_health
+                         WHERE id = (SELECT id FROM poultry_health WHERE user = ? ORDER BY timestamp DESC LIMIT 1)''',
+                      (str(user_id),))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"❌ Error deleting previous case: {e}")
+
+        user_session_data[user_id] = {}
+        await query.message.edit_text("🆕 Starting a new case...")
+        await send_checklist(user_id, query.message.reply_text)
+
+    return SELECTING_DATA
 
 async def send_checklist(user_id, send_func):
     if user_id not in user_session_data:
@@ -68,8 +120,22 @@ async def send_checklist(user_id, send_func):
         filled = "✅" if field in session else "❌"
         checklist += f"{filled} {field}\n"
     checklist += "\nTap a button below to enter or update a field:"
-    
+
+    # Field selection buttons
     keyboard = [[InlineKeyboardButton(field, callback_data=field)] for field in DATA_FIELDS]
+    
+    # Extra optional image upload button
+    keyboard.append([InlineKeyboardButton("📷 Upload Symptom Image (Optional)", callback_data="upload_image_option")])
+    
+    # Review Data button
+    keyboard.append([InlineKeyboardButton("🔍 Review Entered Data", callback_data="review_data")])
+
+    # Add 'Cancel' and 'Finish' buttons at the bottom
+    keyboard.append([
+        InlineKeyboardButton("❌ Cancel", callback_data="cancel_entry"),
+        InlineKeyboardButton("✅ Finish", callback_data="finish_review")
+    ])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     await send_func(checklist, reply_markup=reply_markup)
 
@@ -108,16 +174,18 @@ async def enter_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(value) < 2:
             await update.message.reply_text("❌ Please enter more details (at least 2 characters).")
             return ENTERING_VALUE
+    elif field == "Infection Symptoms":
+        if len(value) < 2:
+            await update.message.reply_text("❌ Please enter more details (at least 2 characters).")
+            return ENTERING_VALUE
 
     if user_id not in user_session_data:
         user_session_data[user_id] = {}
     user_session_data[user_id][field] = {"value": value}
+    
+    await update.message.reply_text(f"✅ {field} enterred.")
 
-    if field == "Infection Symptoms":
-        await update.message.reply_text("📷 You can now upload an image (optional) or type /skip if none.")
-        return UPLOADING_IMAGE
-    else:
-        return await ask_next_action(update)
+    return await ask_next_action(update)
     
 # Helper after data entry
 async def ask_next_action(update):
@@ -149,6 +217,36 @@ async def upload_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_confirmation(update, context)
     return CONFIRMING
 
+async def handle_image_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_menu")]
+    ])
+
+    await query.message.reply_text(
+        "📷 Please upload an image for infection symptoms by:\n"
+        "1️⃣ Tapping the 📎 (paperclip) or 📷 (camera) icon below.\n"
+        "2️⃣ Selecting or taking a photo.\n\n"
+        "If you don't want to upload one, you can tap the button below to return.",
+        reply_markup=keyboard
+    )
+
+    return UPLOADING_IMAGE
+
+async def send_back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    # Safely remove image upload handler context if any
+    if "current_field" in context.user_data:
+        del context.user_data["current_field"]
+
+    # Use `reply_text` to send a fresh checklist message
+    await send_checklist(query.from_user.id, query.message.reply_text)
+    return SELECTING_DATA
+
 # Skip uploading image
 async def skip_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_confirmation(update, context)
@@ -177,6 +275,9 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send("📋 Here's the data you've entered:")
 
     for field, content in data.items():
+        if field.startswith("__"):
+            continue  # skip metadata keys like __case_id
+
         msg = f"📌 *{field}*\n📝 {content['value']}"
         if field == "Infection Symptoms" and "image" in content:
             try:
@@ -212,23 +313,42 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         vaccination_med = session_data.get("Vaccination/Medication", {}).get("value")
         infection_symptoms = session_data.get("Infection Symptoms", {}).get("value")
         image_path = session_data.get("Infection Symptoms", {}).get("image")
-
-        c.execute('''
-            INSERT INTO poultry_health (
-                user, body_weight, body_temperature,
-                vaccination_medication, infection_symptoms, image_path
-            ) VALUES (?, ?, ?, ?, ?, ?)
-        ''', (
-            str(user_id), body_weight, body_temperature,
-            vaccination_med, infection_symptoms, image_path
-        ))
+        case_id = session_data.pop("__case_id", None)
+        
+        if case_id:
+            # Update existing case
+            c.execute('''
+                UPDATE poultry_health SET 
+                    body_weight = ?, 
+                    body_temperature = ?, 
+                    vaccination_medication = ?, 
+                    infection_symptoms = ?, 
+                    image_path = ?
+                WHERE id = ?
+            ''', (
+                body_weight, body_temperature, vaccination_med, infection_symptoms, image_path, case_id
+            ))
+        else:
+            # Insert new case
+            c.execute('''
+                INSERT INTO poultry_health (
+                    user, body_weight, body_temperature,
+                    vaccination_medication, infection_symptoms, image_path
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                str(user_id), body_weight, body_temperature,
+                vaccination_med, infection_symptoms, image_path
+            ))
 
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"❌ DB Write Error: {e}")
 
-    await query.edit_message_text("✅ Case saved successfully.")
+    if len(session_data) < len(DATA_FIELDS):
+        await query.edit_message_text("📝 Your incomplete case has been saved for future completion.")
+    else:
+        await query.edit_message_text("✅ Case saved successfully.")
     user_session_data.pop(user_id, None)
     return ConversationHandler.END
 
@@ -236,10 +356,47 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Yes, cancel and delete", callback_data="cancel_confirmed")],
+        [InlineKeyboardButton("🔙 No, go back", callback_data="cancel_abort")]
+    ])
+    
+    await query.edit_message_text(
+        "⚠️ Are you sure you want to cancel and delete all progress?\nThis will remove your latest case.",
+        reply_markup=keyboard
+    )
+    return CONFIRM_CANCEL
+
+async def cancel_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     user_id = query.from_user.id
+
+    # Remove in-memory data
     user_session_data.pop(user_id, None)
-    await query.edit_message_text("❌ Entry cancelled.")
+
+    # Delete latest case from DB
+    try:
+        conn = sqlite3.connect("poultry_data.db")
+        c = conn.cursor()
+        c.execute('''DELETE FROM poultry_health
+                     WHERE id = (SELECT id FROM poultry_health WHERE user = ? ORDER BY timestamp DESC LIMIT 1)''',
+                  (str(user_id),))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Error deleting case from DB: {e}")
+
+    await query.edit_message_text("❌ Entry and saved progress have been cancelled and deleted.")
     return ConversationHandler.END
+
+
+async def cancel_abort(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await send_checklist(query.from_user.id, query.message.edit_text)
+    return SELECTING_DATA
 
 # Cancel command
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -256,17 +413,58 @@ async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("📭 You haven't entered any data yet.")
         return CONFIRMING
 
-    await query.message.reply_text("📋 Here's what you've entered so far:")
+    # Accumulate all field content
+    review_text = "📋 *Here's what you've entered so far:*\n\n"
     for field, content in data.items():
-        msg = f"📌 *{field}*\n📝 {content['value']}"
-        await query.message.reply_text(msg, parse_mode="Markdown")
+        if field.startswith("__"):
+            continue  # skip metadata keys like __case_id
+        review_text += f"📌 *{field}*\n📝 {content['value']}\n\n"
 
-    await query.message.reply_text("You can continue adding data or finish reviewing.",
+    await query.message.reply_text(
+        review_text,
+        parse_mode="Markdown"
+    )
+
+    # Add buttons for next action
+    await query.message.reply_text(
+        "You can continue adding data or finish reviewing.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Add More", callback_data="add_more")],
             [InlineKeyboardButton("✅ Finish & Review", callback_data="finish_review")]
-        ]))
+        ])
+    )
     return CONFIRMING
+
+def load_incomplete_data(user_id):
+    conn = sqlite3.connect("poultry_data.db")
+    c = conn.cursor()
+    c.execute('''SELECT id, body_weight, body_temperature, vaccination_medication, infection_symptoms, image_path 
+                 FROM poultry_health 
+                 WHERE user = ? 
+                 ORDER BY timestamp DESC LIMIT 1''', (str(user_id),))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return {}
+
+    session_data = {}
+    session_data["__case_id"] = row[0]  # store the DB row id for updating
+
+    field_map = {
+        "Body Weight": row[1],
+        "Body Temperature": row[2],
+        "Vaccination/Medication": row[3],
+        "Infection Symptoms": row[4]
+    }
+
+    for field, value in field_map.items():
+        if value:
+            session_data[field] = {"value": value}
+    if row[5]:
+        session_data["Infection Symptoms"]["image"] = row[5]
+
+    return session_data
 
 # Main
 def main():
@@ -278,11 +476,24 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            SELECTING_DATA: [CallbackQueryHandler(select_data)],
+            RESUME_OR_NEW: [
+                CallbackQueryHandler(handle_resume_decision, pattern="resume_case"),
+                CallbackQueryHandler(handle_resume_decision, pattern="new_case")
+            ],
+            SELECTING_DATA: [
+                CallbackQueryHandler(select_data, pattern=f"^({'|'.join(DATA_FIELDS)})$"),
+                CallbackQueryHandler(cancel_entry, pattern="^cancel_entry$"),
+                CallbackQueryHandler(show_confirmation, pattern="^finish_review$"),
+                CallbackQueryHandler(handle_image_option, pattern="^upload_image_option$"),
+                CallbackQueryHandler(send_back_to_main_menu, pattern="^back_to_menu$"),
+                CallbackQueryHandler(review_callback, pattern="review_data"),
+                CallbackQueryHandler(confirm_save, pattern="confirm_save"),
+            ],
             ENTERING_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_value)],
             UPLOADING_IMAGE: [
                 MessageHandler(filters.PHOTO, upload_image),
-                CommandHandler("skip", skip_image)
+                CommandHandler("skip", skip_image),
+                CallbackQueryHandler(send_back_to_main_menu, pattern="^back_to_menu$"),
             ],
             CONFIRMING: [
                 CallbackQueryHandler(confirm_save, pattern="confirm_save"),
@@ -290,6 +501,10 @@ def main():
                 CallbackQueryHandler(start, pattern="add_more"),
                 CallbackQueryHandler(review_callback, pattern="review_data"),
                 CallbackQueryHandler(show_confirmation, pattern="finish_review"),
+            ],
+            CONFIRM_CANCEL: [
+                CallbackQueryHandler(cancel_confirmed, pattern="cancel_confirmed"),
+                CallbackQueryHandler(cancel_abort, pattern="cancel_abort"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
