@@ -29,6 +29,7 @@ user_session_data = {}
 # DB Setup
 def init_db():
     conn = sqlite3.connect("poultry_data.db")
+    print(f"DB Path: {os.path.abspath('poultry_data.db')}")
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS poultry_health (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,9 +43,12 @@ def init_db():
 
 # Start Command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id not in user_session_data:
+        user_session_data[user_id] = {}  # only initialize if not present
+
     keyboard = [[InlineKeyboardButton(field, callback_data=field)] for field in DATA_FIELDS]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    user_session_data[update.message.from_user.id] = {}
     await update.message.reply_text("📋 Select data to enter:", reply_markup=reply_markup)
     return SELECTING_DATA
 
@@ -151,23 +155,28 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Handle confirmation
 async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    session_data = user_session_data.get(user_id, {})
+    print("✅ confirm_save called")
+    try:
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        session_data = user_session_data.get(user_id, {})
+        print(f"Saving session_data for user {user_id}: {session_data}")    
+        print(f"Session data items: {session_data.items()}")    
+        conn = sqlite3.connect("poultry_data.db")
+        c = conn.cursor()
 
-    conn = sqlite3.connect("poultry_data.db")
-    c = conn.cursor()
-
-    for field, content in session_data.items():
-        if field == "Infection Symptoms":
-            continue  # Don't save this field
-        c.execute(
-            "INSERT INTO poultry_health (user, data_type, value) VALUES (?, ?, ?)",
-            (str(user_id), field, content["value"])
-        )
-    conn.commit()
-    conn.close()
+        for field, content in session_data.items():
+            if field == "Infection Symptoms":
+                continue  # Don't save this field
+            c.execute(
+                "INSERT INTO poultry_health (user, data_type, value) VALUES (?, ?, ?)",
+                (str(user_id), field, content["value"])
+            )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ DB Write Error: {e}")
 
     await query.edit_message_text("✅ Data saved successfully (except 'Infection Symptoms').")
     user_session_data.pop(user_id, None)
@@ -191,7 +200,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     init_db()
     os.makedirs("images", exist_ok=True)
-    bot_token = "7020100788:AAHwAgmmocZHULAdthkhzI7vMxbks3G8NVs"
+    bot_token = "7685786328:AAEilDDS65J7-GB43i1LlaCJWJ3bx3i7nWs"
     app = Application.builder().token(bot_token).build()
 
     conv_handler = ConversationHandler(
