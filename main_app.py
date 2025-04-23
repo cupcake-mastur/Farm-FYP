@@ -116,21 +116,25 @@ async def send_checklist(user_id, send_func):
     session = user_session_data[user_id]
     checklist = "📋 Please provide the following information to help track poultry health.\n\n"
     checklist += "✅ = Filled, ❌ = Missing\n\n"
+
     for field in DATA_FIELDS:
         filled = "✅" if field in session else "❌"
         checklist += f"{filled} {field}\n"
+
+    # ✅ Add image status below the main data
+    image_uploaded = "✅ Uploaded" if "__poultry_image" in session else "❌ Not Uploaded"
+    checklist += f"\n🖼️ Infection Image (Optional): {image_uploaded}\n"
+
     checklist += "\nTap a button below to enter or update a field:"
 
-    # Field selection buttons
+    # Buttons for each field
     keyboard = [[InlineKeyboardButton(field, callback_data=field)] for field in DATA_FIELDS]
-    
-    # Extra optional image upload button
-    keyboard.append([InlineKeyboardButton("📷 Upload Symptom Image (Optional)", callback_data="upload_image_option")])
-    
-    # Review Data button
-    keyboard.append([InlineKeyboardButton("🔍 Review Entered Data", callback_data="review_data")])
 
-    # Add 'Cancel' and 'Finish' buttons at the bottom
+    # Optional image upload
+    keyboard.append([InlineKeyboardButton("📷 Upload Symptom Image (Optional)", callback_data="upload_image_option")])
+
+    # Review and Finish
+    keyboard.append([InlineKeyboardButton("🔍 Review Entered Data", callback_data="review_data")])
     keyboard.append([
         InlineKeyboardButton("❌ Cancel", callback_data="cancel_entry"),
         InlineKeyboardButton("✅ Finish", callback_data="finish_review")
@@ -185,18 +189,53 @@ async def enter_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(f"✅ {field} enterred.")
 
-    return await ask_next_action(update)
+    return await ask_next_action(update, context)
     
-# Helper after data entry
-async def ask_next_action(update):
+async def ask_next_action(update, context):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add More", callback_data="add_more")],
         [InlineKeyboardButton("🔍 Review Data", callback_data="review_data")],
         [InlineKeyboardButton("✅ Finish & Review", callback_data="finish_review")]
     ])
-    await update.message.reply_text("What would you like to do next?", reply_markup=keyboard)
+    new_text = "What would you like to do next?"
+
+    # Send new message OR edit the existing one
+    if update.callback_query:
+        message = update.callback_query.message
+    else:
+        message = await update.message.reply_text(new_text, reply_markup=keyboard)
+
+    # Save message ID and chat ID for future editing
+    context.user_data["next_action_msg_id"] = message.message_id
+    context.user_data["next_action_chat_id"] = message.chat_id
+
+    # If message wasn't sent new, update it
+    if update.callback_query:
+        await message.edit_text(new_text, reply_markup=keyboard)
+
     return CONFIRMING
 
+
+async def handle_next_step_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    # Retrieve saved message info
+    msg_id = context.user_data.get("next_action_msg_id")
+    chat_id = context.user_data.get("next_action_chat_id")
+
+    # You can safely remove this delete block entirely
+    # We don't want to delete it anymore, just reuse
+
+    if data == "add_more":
+        return await send_checklist(query.from_user.id, query.message.edit_text)
+
+    elif data == "review_data":
+        return await review_callback(update, context)
+
+    elif data == "finish_review":
+        return await show_confirmation(update, context)
 
 # Handle image upload for Infection Symptoms
 async def upload_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -214,7 +253,7 @@ async def upload_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_session_data[user_id]["__poultry_image"] = image_path
 
     await update.message.reply_text("🖼️ Image received and saved.")
-    return await ask_next_action(update)
+    return await ask_next_action(update, context)
 
 async def handle_image_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -470,21 +509,28 @@ def load_incomplete_data(user_id):
     if not row:
         return {}
 
-    session_data = {}
-    session_data["__case_id"] = row[0]  # store the DB row id for updating
+    # Extract fields
+    row_id, body_weight, body_temp, vacc_med, infection_symptoms, image_path = row
+
+    # Only resume if at least one REQUIRED field is missing
+    if all([body_weight, body_temp, vacc_med, infection_symptoms]):
+        return {}  # No need to resume, it's complete
+
+    session_data = {"__case_id": row_id}
 
     field_map = {
-        "Body Weight": row[1],
-        "Body Temperature": row[2],
-        "Vaccination/Medication": row[3],
-        "Infection Symptoms": row[4]
+        "Body Weight": body_weight,
+        "Body Temperature": body_temp,
+        "Vaccination/Medication": vacc_med,
+        "Infection Symptoms": infection_symptoms
     }
 
     for field, value in field_map.items():
         if value:
             session_data[field] = {"value": value}
-    if row[5]:
-        session_data["__poultry_image"] = row[5]
+
+    if image_path:
+        session_data["__poultry_image"] = image_path
 
     return session_data
 
@@ -521,10 +567,12 @@ def main():
             CONFIRMING: [
                 CallbackQueryHandler(confirm_save, pattern="confirm_save"),
                 CallbackQueryHandler(cancel_entry, pattern="cancel_entry"),
-                CallbackQueryHandler(start, pattern="add_more"),
-                CallbackQueryHandler(review_callback, pattern="review_data"),
-                CallbackQueryHandler(show_confirmation, pattern="finish_review"),
+                # CallbackQueryHandler(start, pattern="add_more"),
+                # CallbackQueryHandler(review_callback, pattern="review_data"),
+                # CallbackQueryHandler(show_confirmation, pattern="finish_review"),
                 CallbackQueryHandler(send_back_to_main_menu, pattern="^back_to_menu$"),
+                CallbackQueryHandler(handle_next_step_callback, pattern="^(add_more|review_data|finish_review)$"),
+                CallbackQueryHandler(select_data, pattern=f"^({'|'.join(DATA_FIELDS)})$"),
             ],
             CONFIRM_CANCEL: [
                 CallbackQueryHandler(cancel_confirmed, pattern="cancel_confirmed"),
