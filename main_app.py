@@ -573,6 +573,7 @@ def main():
                 CallbackQueryHandler(send_back_to_main_menu, pattern="^back_to_menu$"),
                 CallbackQueryHandler(handle_next_step_callback, pattern="^(add_more|review_data|finish_review)$"),
                 CallbackQueryHandler(select_data, pattern=f"^({'|'.join(DATA_FIELDS)})$"),
+                CallbackQueryHandler(handle_image_option, pattern="^upload_image_option$"),
             ],
             CONFIRM_CANCEL: [
                 CallbackQueryHandler(cancel_confirmed, pattern="cancel_confirmed"),
